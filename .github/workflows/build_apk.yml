@@ -1,0 +1,105 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Generate modern Android v2 files while keeping custom manifest
+        run: |
+          mkdir -p assets/images assets/icons assets/fonts
+          if [ -f android/app/src/main/AndroidManifest.xml ]; then
+            cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest.backup.xml
+          fi
+          rm -rf android
+          flutter create --platforms=android --org com.example .
+          if [ -f /tmp/AndroidManifest.backup.xml ]; then
+            cp /tmp/AndroidManifest.backup.xml android/app/src/main/AndroidManifest.xml
+          fi
+
+      - name: Auto-patch known Dart and pubspec issues
+        run: |
+          python3 - << 'EOF'
+          import os, re
+
+          # 1. Upgrade record package so record_linux matches Flutter 3.50+
+          if os.path.exists("pubspec.yaml"):
+              with open("pubspec.yaml", "r") as f:
+                  pub = f.read()
+              pub = re.sub(r'record:\s*\^?[0-9]+\.[0-9]+\.[0-9]+', 'record: ^6.1.2', pub)
+              with open("pubspec.yaml", "w") as f:
+                  f.write(pub)
+
+          # 2. Ensure AppDatabase and AuthSecurityService imports in app_state_controller.dart
+          p1 = "lib/services/app_state_controller.dart"
+          if os.path.exists(p1):
+              with open(p1, "r") as f:
+                  s = f.read()
+              imports = ""
+              if "app_database.dart" not in s:
+                  imports += "import '../database/app_database.dart';\n"
+              if "auth_security_service.dart" not in s:
+                  imports += "import 'auth_security_service.dart';\n"
+              if imports:
+                  s = imports + s
+              with open(p1, "w") as f:
+                  f.write(s)
+
+          # 3. Ensure AppDatabase import in backup_export_service.dart
+          p2 = "lib/services/backup_export_service.dart"
+          if os.path.exists(p2):
+              with open(p2, "r") as f:
+                  s = f.read()
+              if "app_database.dart" not in s:
+                  s = "import '../database/app_database.dart';\n" + s
+              with open(p2, "w") as f:
+                  f.write(s)
+
+          # 4. Fix Theme.of(context).colorScheme.scaffoldBackgroundColor
+          p3 = "lib/screens/notes/note_editor_screen.dart"
+          if os.path.exists(p3):
+              with open(p3, "r") as f:
+                  s = f.read()
+              s = s.replace("Theme.of(context).colorScheme.scaffoldBackgroundColor", "Theme.of(context).scaffoldBackgroundColor")
+              with open(p3, "w") as f:
+                  f.write(s)
+
+          # 5. Fix clearCompletedAt passed into TaskModel(...) constructor instead of .copyWith(...)
+          p4 = "lib/screens/tasks/tasks_screen.dart"
+          if os.path.exists(p4):
+              with open(p4, "r") as f:
+                  s = f.read()
+              s = re.sub(r'(\b\w+)\s*=\s*TaskModel\(([^;]*?clearCompletedAt\s*:)', r'\1 = \1.copyWith(\2', s, flags=re.DOTALL)
+              with open(p4, "w") as f:
+                  f.write(s)
+          EOF
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Debug APK
+        run: flutter build apk --debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-space-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
